@@ -55,12 +55,13 @@ def fetch_github_trending(top_n=10, days=7):
     results = []
     for repo in items[:top_n]:
         results.append({
-            "full_name":   repo["full_name"],
-            "name":        repo["name"],
-            "stars":       repo["stargazers_count"],
+            # 【健壮性】全部用 .get 兜默认值，避免异常 item 缺键时 KeyError
+            "full_name":   repo.get("full_name", ""),
+            "name":        repo.get("name", ""),
+            "stars":       repo.get("stargazers_count", 0),
             "language":    repo.get("language") or "其他",
             "description": repo.get("description") or "(暂无描述)",
-            "url":         repo["html_url"],
+            "url":         repo.get("html_url", ""),
         })
     return results
 
@@ -137,8 +138,16 @@ def fetch_earnings(days_ahead=30, watch_tickers=None):
         # 只保留关注列表里的大公司
         if watch and sym not in watch:
             continue
+        # 【健壮性】跳过无日期条目：否则下面 results.sort(key=x["date"]) 会拿
+        # None 与字符串比较抛 TypeError（与上面 IPO 路径的守卫保持一致）
+        if not e.get("date"):
+            continue
         eps_est = e.get("epsEstimate")
-        eps_prev = e.get("epsActual")  # 上期实际(用于偏多偏空判断)
+        # 注意：Finnhub 财报日历的 epsActual 是「本次」实际值，财报未发布时为 None，
+        # 不能当作「上期」用来算同比（原代码 bug）。日历接口不提供上期 EPS，
+        # 因此这里 eps_prev 保持 None，formatter 会安全地走「预期盈利正/负」判断，
+        # 避免给出虚假的同比涨跌。
+        eps_prev = None
         results.append({
             "date":     e.get("date"),
             "symbol":   sym,
@@ -182,7 +191,8 @@ def fetch_economic(days_ahead=7, min_impact="medium"):
         # 只保留美国的高影响事件
         if ev.get("country") != "US":
             continue
-        imp = ev.get("impact", "low")
+        # 【健壮性】统一转小写，避免 API 返回 "High"/"HIGH"/None 等被当成 low 静默丢弃
+        imp = str(ev.get("impact") or "low").strip().lower()
         if impact_rank.get(imp, 1) < min_rank:
             continue
         results.append({
@@ -204,7 +214,12 @@ def fetch_economic(days_ahead=7, min_impact="medium"):
 _binance_symbols_cache = None
 
 def _load_binance_symbols():
-    """加载币安所有现货和合约交易对,缓存"""
+    """加载币安所有现货和合约交易对,缓存。
+
+    注意：GitHub Actions 服务器在境外，访问 api.binance.com 会被地域封锁
+    返回 451。此时直接降级为空集合（视为无镜像），并用短超时避免拖慢整个
+    推送。绝大多数美股本来就没有币安镜像，降级不影响主要信息。
+    """
     global _binance_symbols_cache
     if _binance_symbols_cache is not None:
         return _binance_symbols_cache
@@ -212,21 +227,25 @@ def _load_binance_symbols():
     spot = set()
     futures = set()
     try:
-        # 现货
         r = requests.get("https://api.binance.com/api/v3/exchangeInfo",
-                         timeout=15)
-        for s in r.json().get("symbols", []):
-            spot.add(s["baseAsset"])
+                         timeout=6)
+        if r.status_code == 451:
+            print("币安现货 451（地域封锁），降级为无镜像")
+        elif r.ok:
+            for s in r.json().get("symbols", []):
+                spot.add(s["baseAsset"])
     except Exception as e:
-        print(f"币安现货列表获取失败: {e}")
+        print(f"币安现货列表获取失败（降级无镜像）: {e}")
     try:
-        # U本位合约
         r = requests.get("https://fapi.binance.com/fapi/v1/exchangeInfo",
-                         timeout=15)
-        for s in r.json().get("symbols", []):
-            futures.add(s["baseAsset"])
+                         timeout=6)
+        if r.status_code == 451:
+            print("币安合约 451（地域封锁），降级为无镜像")
+        elif r.ok:
+            for s in r.json().get("symbols", []):
+                futures.add(s["baseAsset"])
     except Exception as e:
-        print(f"币安合约列表获取失败: {e}")
+        print(f"币安合约列表获取失败（降级无镜像）: {e}")
 
     _binance_symbols_cache = {"spot": spot, "futures": futures}
     return _binance_symbols_cache

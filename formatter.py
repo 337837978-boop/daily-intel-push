@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-每日投资情报系统 · 消息格式化模块
+每日投资情报系统 · 消息格式化模块（最终模板版）
 ================================================
-把抓取的数据组装成钉钉markdown推送
-按确认的排版:三大板块,粗细分隔线,结尾"高山仰止 景行行止"
+最终模板要点：
+  · 顶部「⚡ 今日速览」一行 TL;DR
+  · GitHub：中文标签 + 🎯前置强相关 + 中文描述 + 量化类↳点评
+  · IPO：公司名「中文（English）」并列
+  · 财报：中文名 + 英文代码 + 「还有N天」+ 盘前/盘后
+  · 经济数据：事件名「中文（English）」并列 + 相对时间（今晚/后天凌晨）
+  · 结尾「高山仰止 景行行止」
 """
 
 from datetime import datetime, timedelta
@@ -18,6 +23,72 @@ LANG_ICON = {
 }
 
 WEEKDAY_CN = ["周一","周二","周三","周四","周五","周六","周日"]
+
+# 经济事件英文名 → 中文名（本地映射，覆盖常见高影响事件）
+ECON_NAME_CN = {
+    "cpi": "CPI 通胀",
+    "core cpi": "核心CPI",
+    "cpi mom": "CPI 月率",
+    "cpi yoy": "CPI 年率",
+    "core cpi mom": "核心CPI 月率",
+    "core cpi yoy": "核心CPI 年率",
+    "ppi": "PPI 生产者物价",
+    "core ppi": "核心PPI",
+    "pce": "PCE 物价",
+    "core pce": "核心PCE",
+    "nonfarm payrolls": "非农就业",
+    "non-farm payrolls": "非农就业",
+    "nonfarm": "非农就业",
+    "unemployment rate": "失业率",
+    "initial jobless claims": "初请失业金",
+    "retail sales": "零售销售",
+    "core retail sales": "核心零售销售",
+    "gdp": "GDP 经济增速",
+    "gdp growth rate": "GDP 增速",
+    "fed interest rate decision": "美联储利率决议",
+    "interest rate decision": "利率决议",
+    "fomc": "FOMC 会议",
+    "fomc minutes": "FOMC 会议纪要",
+    "ism manufacturing pmi": "ISM 制造业PMI",
+    "ism services pmi": "ISM 服务业PMI",
+    "consumer confidence": "消费者信心指数",
+    "michigan consumer sentiment": "密歇根消费者信心",
+    "durable goods orders": "耐用品订单",
+}
+
+
+# ======================================================================
+# 顶部「今日速览」：抽取当天最该注意的 1-2 件事
+# ======================================================================
+def _build_tldr(earnings, econ_events):
+    """从经济数据(高影响)和近期财报里挑出最该注意的，拼一行速览。"""
+    highlights = []
+
+    # 高影响经济事件（最多取2个，按时间）
+    for ev in econ_events:
+        if ev.get("impact") == "high":
+            cn = _econ_name_cn(ev["event"])
+            # 速览里只取中文部分（去掉英文括号），更紧凑
+            cn_short = cn.split("（")[0]
+            rel = _relative_day(ev.get("time", ""))
+            rel_str = f"{rel}" if rel else ""
+            highlights.append(f"{rel_str}{cn_short}")
+        if len(highlights) >= 2:
+            break
+
+    # 近一周内的重点财报（最多补1个）
+    now = datetime.utcnow() + timedelta(hours=8)
+    for e in earnings:
+        days = _days_until(e.get("date", ""))
+        if days is not None and 0 <= days <= 7:
+            sym = e["symbol"]
+            cn = config.COMPANY_CN.get(sym, sym)
+            highlights.append(f"{cn}{_fmt_hour(e.get('hour',''))}财报")
+            break
+
+    if not highlights:
+        return ""
+    return "**⚡ 今日速览**：" + "｜".join(highlights)
 
 
 # ======================================================================
@@ -34,14 +105,22 @@ def format_github(repos):
         num   = circled[i] if i < 10 else f"{i+1}."
         icon  = LANG_ICON.get(repo["language"], "📦")
         stars = f"{repo['stars']:,}"
-        desc  = repo["description"]
-        # 描述截断到合理长度
+        tag   = repo.get("tag", "")
+        note  = repo.get("note", "")
+        # 中文描述优先，回退英文
+        desc  = repo.get("desc_cn") or repo.get("description", "")
         if len(desc) > 100:
             desc = desc[:100] + "..."
 
-        lines.append(f"**{num} {repo['full_name']}**")
+        # 强相关（量化/交易、数据/基础设施）前置 🎯
+        bullseye = "🎯 " if tag in ("量化/交易", "数据/基础设施") else ""
+        tag_str = f"　`{tag}`" if tag else ""
+
+        lines.append(f"**{bullseye}{num} {repo['full_name']}**{tag_str}")
         lines.append(f"⭐ {stars}　{icon} {repo['language']}")
         lines.append(f"> {desc}")
+        if note:
+            lines.append(f"　↳ {note}")
         lines.append(f"🔍 GitHub搜索 `{repo['name']}`")
         if i < len(repos) - 1:
             lines.append("─────────────")
@@ -60,21 +139,30 @@ def format_us_stocks(ipos, earnings):
     if ipos:
         for ipo in ipos:
             date_str = _fmt_date(ipo["date"])
-            name = ipo["name"]
+            name_en = ipo.get("name", "")
+            name_cn = ipo.get("name_cn", "")
+            # 「中文（English）」并列，没有中文译名就只显示英文
+            if name_cn and name_en:
+                name_disp = f"{name_cn}（{name_en}）"
+            else:
+                name_disp = name_cn or name_en or ipo.get("symbol", "")
+
             price = ipo.get("price") or "待定"
             price_str = f"${price}" if price != "待定" else "待定"
-            lines.append(f"\n**{date_str}　{name}**")
-            lines.append(f"`{ipo['symbol']}`　{price_str}　{ipo['exchange']}")
-            # 币安镜像
+
+            # 币安镜像并到同一行
             from sources import check_binance_mirror
             has_spot, has_fut = check_binance_mirror(ipo["symbol"])
             if has_spot or has_fut:
                 parts = []
-                if has_fut:  parts.append(f"✅合约 {ipo['symbol']}USDT")
-                if has_spot: parts.append(f"✅现货 {ipo['symbol']}")
-                lines.append(f"💱 币安：{' '.join(parts)}")
+                if has_fut:  parts.append(f"合约{ipo['symbol']}USDT")
+                if has_spot: parts.append(f"现货{ipo['symbol']}")
+                mirror = "💱 ✅ " + " ".join(parts)
             else:
-                lines.append(f"💱 币安：❌ 暂无镜像")
+                mirror = "💱 ❌ 无镜像"
+
+            lines.append(f"\n**{date_str}　{name_disp}**")
+            lines.append(f"`{ipo['symbol']}`　{price_str}　{ipo['exchange']}　{mirror}")
     else:
         lines.append("> 近一个月暂无确定的新股上市")
 
@@ -91,12 +179,23 @@ def format_us_stocks(ipos, earnings):
             hour = _fmt_hour(e.get("hour", ""))
             eps_est = e.get("eps_est")
 
-            lines.append(f"\n**{date_str}　{name_disp}**（{hour}）")
+            # 「还有N天」
+            days = _days_until(e.get("date", ""))
+            if days is not None:
+                if days == 0:
+                    when = "今天"
+                elif days == 1:
+                    when = "明天"
+                else:
+                    when = f"还有{days}天"
+                date_disp = f"{date_str}（{when}）"
+            else:
+                date_disp = date_str
+
+            lines.append(f"\n**{date_disp}　{name_disp}**　{hour}")
             if eps_est is not None:
-                lines.append(f"预期EPS ${eps_est}")
-                # 偏多偏空判断
                 bias = _earnings_bias(e)
-                lines.append(bias)
+                lines.append(f"预期EPS ${eps_est}　{bias}")
             else:
                 lines.append("预期EPS 待定")
     else:
@@ -111,16 +210,14 @@ def _earnings_bias(e):
     eps_prev = e.get("eps_prev")
     if eps_est is None:
         return "⚪ 中性：数据不足"
-    # 如果有上期数据,对比
     if eps_prev is not None and eps_prev != 0:
         change = (eps_est - eps_prev) / abs(eps_prev) * 100
         if change > 5:
-            return f"🟢 偏多：预期同比+{change:.0f}%，盈利改善"
+            return f"🟢 偏多：同比+{change:.0f}%，盈利改善"
         elif change < -5:
-            return f"🔴 偏空：预期同比{change:.0f}%，盈利下滑"
+            return f"🔴 偏空：同比{change:.0f}%，盈利下滑"
         else:
             return f"⚪ 中性：预期与上期持平"
-    # 无上期数据,只看EPS正负
     if eps_est > 0:
         return f"🟢 偏多：预期盈利为正"
     else:
@@ -130,7 +227,6 @@ def _earnings_bias(e):
 # ======================================================================
 # 板块三:经济数据
 # ======================================================================
-# 常见经济指标的解释和影响逻辑
 ECON_EXPLAIN = {
     "CPI": {
         "what": "衡量物价上涨速度，是美联储降息的最关键依据。",
@@ -181,7 +277,6 @@ ECON_EXPLAIN = {
 
 
 def _match_econ_explain(event_name):
-    """根据事件名匹配解释"""
     name_lower = event_name.lower()
     if "core cpi" in name_lower or ("core" in name_lower and "cpi" in name_lower):
         return ECON_EXPLAIN["Core CPI"]
@@ -204,6 +299,21 @@ def _match_econ_explain(event_name):
     return None
 
 
+def _econ_name_cn(event_name):
+    """事件英文名 → 「中文（English）」；查不到映射就只显示英文。"""
+    key = event_name.lower().strip()
+    cn = ECON_NAME_CN.get(key)
+    if not cn:
+        # 模糊匹配：包含关系
+        for k, v in ECON_NAME_CN.items():
+            if k in key:
+                cn = v
+                break
+    if cn:
+        return f"{cn}（{event_name}）"
+    return event_name
+
+
 def format_economic(events):
     lines = ["# 📊 本周重磅经济数据\n"]
     if not events:
@@ -211,15 +321,15 @@ def format_economic(events):
         return "\n".join(lines)
 
     for i, ev in enumerate(events):
-        # 时间(UTC转北京时间)
         bj_time = _utc_to_bj(ev.get("time", ""))
+        rel = _relative_day(ev.get("time", ""))
+        rel_str = f"（{rel}）" if rel else ""
         flag = "🇺🇸"
         impact_mark = " ⚠️ 高影响" if ev.get("impact") == "high" else ""
 
-        lines.append(f"**{flag} {bj_time}**{impact_mark}")
-        lines.append(f"### {ev['event']}")
+        lines.append(f"**{flag} {bj_time}{rel_str}**{impact_mark}")
+        lines.append(f"### {_econ_name_cn(ev['event'])}")
 
-        # 预期值和前值
         est = ev.get("estimate")
         prev = ev.get("prev")
         detail = []
@@ -230,14 +340,13 @@ def format_economic(events):
         if detail:
             lines.append("　".join(detail))
 
-        # 解释和影响
         explain = _match_econ_explain(ev["event"])
         if explain:
             lines.append(f"> {explain['what']}")
-            lines.append(f"📈 **高于预期** → {explain['high']}")
-            lines.append(f"📉 **低于预期** → {explain['low']}")
+            lines.append(f"📈 高于预期 → {explain['high']}")
+            lines.append(f"📉 低于预期 → {explain['low']}")
         else:
-            lines.append(f"> 重要经济指标,关注实际值与预期的差异")
+            lines.append(f"> 重要经济指标，关注实际值与预期的差异")
 
         if i < len(events) - 1:
             lines.append("─────────────")
@@ -258,23 +367,25 @@ def build_full_report(github_repos, ipos, earnings, econ_events):
     # 标题
     parts.append(f"# 📰 {config.REPORT_TITLE}")
     parts.append(f"### {date_str} {weekday} · 07:30")
+
+    # 今日速览
+    tldr = _build_tldr(earnings, econ_events)
+    if tldr:
+        parts.append(tldr)
+
     parts.append("═══════════════")
 
-    # 板块一
     parts.append(format_github(github_repos))
     parts.append("═══════════════")
 
-    # 板块二
     parts.append(format_us_stocks(ipos, earnings))
     parts.append("═══════════════")
 
-    # 板块三
     parts.append(format_economic(econ_events))
     parts.append("═══════════════")
 
-    # 结尾
     parts.append(f"📡 GitHub API · Finnhub")
-    parts.append(f"\n**{config.FOOTER}**")
+    parts.append(f"**{config.FOOTER}**")
 
     return "\n\n".join(parts)
 
@@ -296,6 +407,41 @@ def _fmt_hour(hour_code):
     return mapping.get(hour_code, hour_code or "时间待定")
 
 
+def _days_until(date_str):
+    """距今天还有几天（按北京时间日期）。无法解析返回 None。"""
+    try:
+        target = datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+        today = (datetime.utcnow() + timedelta(hours=8)).date()
+        return (target - today).days
+    except Exception:
+        return None
+
+
+def _relative_day(utc_time_str):
+    """根据北京时间日期返回 今晚/明天/后天凌晨 等相对描述；无则返回 ''。"""
+    try:
+        dt = datetime.strptime(utc_time_str, "%Y-%m-%d %H:%M:%S") + timedelta(hours=8)
+    except Exception:
+        try:
+            dt = datetime.strptime(utc_time_str[:10], "%Y-%m-%d") + timedelta(hours=8)
+        except Exception:
+            return ""
+    today = (datetime.utcnow() + timedelta(hours=8)).date()
+    delta = (dt.date() - today).days
+    hour = dt.hour
+    # 凌晨判断（0-6点）
+    is_dawn = 0 <= hour < 6
+    if delta == 0:
+        return "凌晨" if is_dawn else ("今晚" if hour >= 18 else "今天")
+    if delta == 1:
+        return "明天凌晨" if is_dawn else ("明晚" if hour >= 18 else "明天")
+    if delta == 2:
+        return "后天凌晨" if is_dawn else "后天"
+    if 3 <= delta <= 6:
+        return f"{delta}天后凌晨" if is_dawn else f"{delta}天后"
+    return ""
+
+
 def _utc_to_bj(utc_time_str):
     """UTC时间字符串转北京时间显示"""
     try:
@@ -305,7 +451,6 @@ def _utc_to_bj(utc_time_str):
         return bj.strftime(f"%m-%d {weekday} %H:%M")
     except Exception:
         try:
-            # 只有日期的情况
             dt = datetime.strptime(utc_time_str[:10], "%Y-%m-%d")
             weekday = WEEKDAY_CN[dt.weekday()]
             return dt.strftime(f"%m-%d {weekday}")

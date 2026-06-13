@@ -26,5 +26,6 @@ jobs:
           DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
           DINGTALK_SECRET:  ${{ secrets.DINGTALK_SECRET }}
           FINNHUB_KEY:      ${{ secrets.FINNHUB_KEY }}
+          DEEPSEEK_KEY:     ${{ secrets.DEEPSEEK_KEY }}
           GITHUB_TOKEN:     ${{ secrets.GITHUB_TOKEN }}
         run: python main.py

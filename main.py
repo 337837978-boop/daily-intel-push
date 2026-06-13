@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import config
 import sources
 import formatter
+import translate
 import notify
 
 
@@ -53,6 +54,12 @@ def main():
         min_impact=config.ECON_MIN_IMPACT,
     )
     print(f"  获取到 {len(econ)} 个重磅经济事件")
+
+    # ── 4.5 AI 翻译 + 打标签（DeepSeek，一次性批量，失败自动降级英文） ──
+    print("\n[AI] 翻译 GitHub 描述 + 打标签 + IPO 公司名...")
+    github_repos = translate.enrich_github(github_repos)
+    ipos = translate.enrich_ipos(ipos)
+    print("  AI 处理完成")
 
     # ── 组装并推送 ──
     print("\n组装推送内容...")
